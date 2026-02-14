@@ -43,7 +43,12 @@ app.use(
     store: MongoStore.create({
       mongoUrl: process.env.MONGO_URI,
     }),
-    cookie: { secure: false },
+    cookie: {
+      secure: true, // Required for HTTPS on Render
+      sameSite: "none", // Required for cross-domain (Netlify -> Render)
+      maxAge: 24 * 60 * 60 * 1000,
+    },
+    proxy: true, // Required for Render's reverse proxy
   }),
 );
 
