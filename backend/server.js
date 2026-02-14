@@ -103,7 +103,7 @@ app.get("/oauth/callback", async (req, res) => {
     /* Save session */
     req.session.clickupUserId = clickupUserId;
 
-    res.redirect(`${process.env.FRONTEND_URL}/dashboard`);
+    res.redirect(`${process.env.FRONTEND_URL}`);
   } catch (err) {
     console.error("OAuth error:", err.response?.data || err.message);
     res.status(500).send("OAuth failed");
