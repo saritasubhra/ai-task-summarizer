@@ -130,47 +130,149 @@ app.get("/me", async (req, res) => {
 app.post("/summarize", async (req, res) => {
   const { taskId } = req.body;
 
-  if (!req.session.clickupUserId)
+  /* ========= Auth check ========= */
+  if (!req.session.clickupUserId) {
     return res.status(401).json({ error: "Login required" });
+  }
+
+  if (!taskId) {
+    return res.status(400).json({ error: "taskId is required" });
+  }
 
   try {
+    /* ========= Get stored OAuth token ========= */
     const user = await User.findOne({
       clickupUserId: req.session.clickupUserId,
     });
 
+    if (!user?.accessToken) {
+      return res.status(401).json({ error: "Invalid session token" });
+    }
+
     const accessToken = user.accessToken;
 
-    /* Fetch task comments */
+    /* =====================================================
+       1️⃣ Fetch TASK DETAILS (name, status, dates, assignees)
+    ====================================================== */
+    const taskRes = await axios.get(
+      `https://api.clickup.com/api/v2/task/${taskId}`,
+      { headers: { Authorization: accessToken } },
+    );
+
+    const task = taskRes.data;
+
+    const taskInfo = {
+      name: task.name,
+      status: task.status?.status || "Unknown",
+      priority: task.priority?.priority || "None",
+      assignees: task.assignees?.map((a) => a.username) || [],
+      startDate: task.start_date
+        ? new Date(Number(task.start_date)).toDateString()
+        : "Not set",
+      dueDate: task.due_date
+        ? new Date(Number(task.due_date)).toDateString()
+        : "Not set",
+      timeEstimate: task.time_estimate
+        ? `${Math.round(task.time_estimate / (1000 * 60 * 60))} hrs`
+        : "Not set",
+    };
+
+    /* =====================================================
+       2️⃣ Calculate remaining days in BACKEND (not AI)
+    ====================================================== */
+    let remainingDays = "No due date";
+
+    if (task.due_date) {
+      const due = new Date(Number(task.due_date));
+      const now = new Date();
+      const diff = Math.ceil((due - now) / (1000 * 60 * 60 * 24));
+      remainingDays = diff >= 0 ? `${diff} days left` : "Overdue";
+    }
+
+    /* =====================================================
+       3️⃣ Fetch TASK COMMENTS / ACTIVITY
+    ====================================================== */
     const commentsRes = await axios.get(
       `https://api.clickup.com/api/v2/task/${taskId}/comment`,
       { headers: { Authorization: accessToken } },
     );
 
-    const text = commentsRes.data.comments
-      .map((c) => c.comment_text)
+    const commentsText = commentsRes.data.comments
+      ?.map((c) => c.comment_text)
+      .filter(Boolean)
       .join("\n");
 
-    if (!text.trim())
-      return res.json({ summary: "No activity found to summarize." });
+    /* If no comments, still generate structured overview */
+    const safeComments =
+      commentsText && commentsText.trim().length > 0
+        ? commentsText
+        : "No discussion comments available.";
 
-    /* Gemini summary */
+    /* =====================================================
+       4️⃣ STRUCTURED GEMINI PROMPT (very important)
+    ====================================================== */
     const prompt = `
-Summarize this ClickUp task activity in bullet points.
-Include:
-- Key updates
-- Decisions
-- Pending work
+You are an AI project management assistant.
 
-${text}
+Generate a CLEAR, STRUCTURED task summary in **Markdown bullet format only**.
+
+Follow this EXACT structure:
+
+## Task Overview
+- Name:
+- Status:
+- Priority:
+- Assignees:
+- Time Estimate:
+
+## Timeline
+- Start Date:
+- Due Date:
+- Days Remaining:
+
+## Key Updates from Discussion
+- Bullet points summarizing meaningful progress or decisions.
+
+## Pending Work / Risks
+- Bullet points describing unfinished tasks or blockers.
+
+STRICT RULES:
+- Use ONLY bullet points (no paragraphs).
+- Keep it concise and professional.
+- Do NOT invent data not provided.
+
+=== TASK DATA ===
+${JSON.stringify(taskInfo, null, 2)}
+Days Remaining: ${remainingDays}
+
+=== COMMENTS ===
+${safeComments}
 `;
 
+    /* =====================================================
+       5️⃣ Call Gemini
+    ====================================================== */
     const result = await model.generateContent(prompt);
     const summary = result.response.text();
 
-    res.json({ summary });
+    /* =====================================================
+       6️⃣ Return clean response
+    ====================================================== */
+    res.json({
+      summary,
+      meta: {
+        remainingDays,
+        taskName: taskInfo.name,
+        status: taskInfo.status,
+      },
+    });
   } catch (err) {
     console.error("Summarization error:", err.response?.data || err.message);
-    res.status(500).json({ error: "Failed to summarize task" });
+
+    res.status(500).json({
+      error: "Failed to summarize task",
+      details: err.response?.data || err.message,
+    });
   }
 });
 
